@@ -1,0 +1,82 @@
+# ── Secrets & credentials (NEVER commit) ─────────────────────────────────────
+.env
+.env.*
+!.env.example
+credentials/
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+backend/.keka_session.json
+backend/.keka_approve_endpoint.json
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+.tox/
+
+# ── Backend runtime / temp files ─────────────────────────────────────────────
+backend/app.db
+backend/data/keka_input/
+backend/data/keka_output/
+backend/data/keka_test_debug/
+backend/data/test_auto_run/
+backend/data/ocr_cache.json
+backend/data/sheets_config.json
+backend/debug_screenshots/
+backend/*.log
+backend/*.log.*
+backend/*_log.txt
+backend/*_out.log
+backend/*_err.log
+backend/*_stderr.txt
+backend/*_stdout.txt
+backend/backend.log
+backend/backend.log.err
+backend/uvicorn.log
+backend/uvicorn_err.log
+backend/captcha.png
+backend/login_page.png
+backend/..backend.log
+backend/..backend_log.txt
+
+# ── Backend test/debug scripts ───────────────────────────────────────────────
+backend/test_*.py
+backend/debug_*.py
+
+# ── Uploaded session data (runtime, not source) ──────────────────────────────
+uploads/
+
+# ── Node / Frontend ──────────────────────────────────────────────────────────
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.env.production
+.npm/
+*.local
+
+# ── Logs (root) ──────────────────────────────────────────────────────────────
+logs/
+*.log
+backend.log
+
+# ── IDE / OS ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Claude agent internal ────────────────────────────────────────────────────
+.claude/
