@@ -42,26 +42,30 @@ if sys.platform == "win32":
 
 def _ensure_proactor_loop():
     """
-    Guarantee the calling thread owns an asyncio.ProactorEventLoop.
+    Guarantee the calling thread uses WindowsProactorEventLoopPolicy + ProactorEventLoop.
 
-    FastAPI threadpool threads on Windows are created with SelectorEventLoop,
-    which raises NotImplementedError when Playwright tries to launch a subprocess.
-    Calling this at the start of any sync_playwright() block replaces the loop
-    with a ProactorEventLoop that supports subprocess creation.
-    Safe to call multiple times — a no-op if the loop is already ProactorEventLoop.
+    Uvicorn sets WindowsSelectorEventLoopPolicy globally on Windows, which means
+    asyncio.new_event_loop() (called inside Playwright's sync_playwright().__enter__)
+    also returns a SelectorEventLoop — causing Playwright's PipeTransport subprocess
+    launch to fail with the cryptic '_playwright' AttributeError.
+
+    Fixing the policy in this thread (before sync_playwright() is called) ensures
+    Playwright's internal new_event_loop() returns a ProactorEventLoop.
     """
     if sys.platform != "win32":
         return
     try:
-        loop = asyncio.get_event_loop()
-        if isinstance(loop, asyncio.ProactorEventLoop):
-            return
-    except RuntimeError:
-        pass  # no loop set in this thread — fall through to create one
-    try:
+        # Reset policy so Playwright's internal asyncio.new_event_loop() returns ProactorEventLoop
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        try:
+            loop = asyncio.get_event_loop()
+            if isinstance(loop, asyncio.ProactorEventLoop):
+                return
+        except RuntimeError:
+            pass
         loop = asyncio.ProactorEventLoop()
         asyncio.set_event_loop(loop)
-        log.debug("_ensure_proactor_loop: replaced event loop with ProactorEventLoop in thread %s",
+        log.debug("_ensure_proactor_loop: set ProactorEventLoop in thread %s",
                   __import__("threading").current_thread().name)
     except Exception as exc:
         log.warning("_ensure_proactor_loop: could not set ProactorEventLoop: %s", exc)

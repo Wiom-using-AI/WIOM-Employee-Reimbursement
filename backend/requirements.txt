@@ -25,3 +25,6 @@ google-auth==2.29.0
 
 # Utilities
 python-dotenv==1.0.1
+
+# Browser automation (Keka login)
+playwright==1.58.0

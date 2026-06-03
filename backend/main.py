@@ -92,6 +92,11 @@ def _run_in_proactor_thread(fn, *args, **kwargs):
 
     def _worker():
         if sys.platform == "win32":
+            # Set the policy FIRST so that Playwright's internal asyncio.new_event_loop()
+            # also returns a ProactorEventLoop (uvicorn sets WindowsSelectorEventLoopPolicy
+            # globally — overriding just the loop is not enough; policy must also be reset
+            # in this thread before Playwright's __enter__ calls new_event_loop()).
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
             loop = asyncio.ProactorEventLoop()
             asyncio.set_event_loop(loop)
         try:
@@ -3349,6 +3354,17 @@ async def keka_postman_interactive(body: PostmanSyncRequest, background_tasks: B
     set date range, set Status→In Approval Process, click Run,
     click Excel download link, click Bulk Receipt. No manual steps needed.
     """
+    # ── Auto-correct inverted date range (from > to → swap) ────────────────
+    from datetime import date as _date
+    try:
+        _fd = _date.fromisoformat(body.from_date)
+        _td = _date.fromisoformat(body.to_date)
+        if _fd > _td:
+            log.warning("Auto-swapping inverted date range: %s > %s", body.from_date, body.to_date)
+            body.from_date, body.to_date = body.to_date, body.from_date
+    except Exception:
+        pass
+
     session_id = str(uuid.uuid4())
     s_dir = _session_dir(session_id)
     os.makedirs(s_dir, exist_ok=True)
@@ -3820,18 +3836,19 @@ class KekaLoginVerifyRequest(BaseModel):
 async def keka_login_start():
     """
     Initiate Keka browser login.
-    Runs Playwright in a dedicated thread with its own event loop.
+    Runs Playwright in a fresh thread with its own ProactorEventLoop
+    (ThreadPoolExecutor reuses threads that may have SelectorEventLoop,
+    which causes sync_playwright to fail on Windows with Playwright 1.47+).
     """
     import asyncio
     import traceback
     import logging as _log
-    from concurrent.futures import ThreadPoolExecutor
     from services.keka_browser import initiate_login
 
     try:
-        loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            result = await loop.run_in_executor(pool, initiate_login)
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _run_in_proactor_thread(initiate_login)
+        )
         return result
     except Exception as exc:
         _log.getLogger(__name__).error("keka_login_start error: %s\n%s", exc, traceback.format_exc())
@@ -3844,15 +3861,14 @@ async def keka_login_verify(body: KekaLoginVerifyRequest):
     import asyncio
     import traceback
     import logging as _log
-    from concurrent.futures import ThreadPoolExecutor
     from services.keka_browser import verify_otp
 
     try:
         otp   = body.otp.strip()
         token = body.token
-        loop  = asyncio.get_event_loop()
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            result = await loop.run_in_executor(pool, verify_otp, otp, token)
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _run_in_proactor_thread(verify_otp, otp, token)
+        )
         return result
     except Exception as exc:
         _log.getLogger(__name__).error("keka_login_verify error: %s\n%s", exc, traceback.format_exc())
@@ -5797,19 +5813,39 @@ def logs_info():
     return info
 
 
-# ── Serve built React frontend (desktop app mode) ────────────────────────────
-# Mount only /assets statically; catch-all serves index.html for SPA routes.
-# This ensures all API routes (including /bill/...) take priority.
+# ── Serve React frontend (desktop + Railway production) ───────────────────────
+# Checks two locations in priority order:
+#   1. /app/static      — Railway production (Dockerfile copies dist here)
+#   2. ../frontend/dist — local dev shortcut
+# Mount only /assets statically so all API routes keep priority;
+# catch-all serves index.html for SPA client-side routes.
+import os as _os
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse as _FR
 
-_frontend_dist = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
-)
-if os.path.isdir(_frontend_dist):
-    _assets_dir = os.path.join(_frontend_dist, "assets")
-    if os.path.isdir(_assets_dir):
-        app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
+def _find_static_dir() -> str:
+    candidates = [
+        _os.path.join(_os.path.dirname(__file__), "static"),           # Railway
+        _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", "frontend", "dist")),  # local
+    ]
+    for p in candidates:
+        if _os.path.isdir(p):
+            return p
+    return ""
+
+_static_dir = _find_static_dir()
+if _static_dir:
+    _assets_dir = _os.path.join(_static_dir, "assets")
+    if _os.path.isdir(_assets_dir):
+        app.mount("/assets", StaticFiles(directory=_assets_dir, html=False), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    async def _spa_root():
+        return _FR(_os.path.join(_static_dir, "index.html"))
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str):
-        return FileResponse(os.path.join(_frontend_dist, "index.html"))
+        fp = _os.path.join(_static_dir, full_path)
+        if _os.path.isfile(fp):
+            return _FR(fp)
+        return _FR(_os.path.join(_static_dir, "index.html"))

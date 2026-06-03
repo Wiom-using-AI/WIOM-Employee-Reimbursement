@@ -1,0 +1,16 @@
+frontend/node_modules
+backend/__pycache__
+backend/*.pyc
+backend/.venv
+backend/venv
+backend/app.db
+backend/data/keka_input/
+backend/data/keka_output/
+backend/data/keka_test_debug/
+backend/uploads/
+backend/.keka_session.json
+backend/debug_screenshots/
+backend/*.log
+.git
+.env
+frontend/dist

@@ -533,21 +533,26 @@ def _keka_set_date_range(page, from_dt, to_dt, on_step=None, out_dir=None):
 
     page.wait_for_timeout(800)
 
-    # ── Step 2: Click "Custom Range" ──────────────────────────────────────
+    # ── Step 2: Click "Custom Range" (only if visible — newer Keka opens ────
+    # directly as a dual-month date range picker without this step)
     try:
-        page.get_by_text('Custom Range', exact=True).click()
-        page.wait_for_timeout(1500)
-        _step("Clicked Custom Range")
-    except Exception as ex:
-        _step(f"Custom Range click error: {ex}")
-        return
+        cr = page.locator('text="Custom Range"').first
+        if cr.is_visible(timeout=1500):
+            cr.click()
+            page.wait_for_timeout(1000)
+            _step("Clicked Custom Range")
+        else:
+            _step("Custom Range not needed — calendar already open")
+    except Exception:
+        _step("Custom Range not present — calendar already in date-range mode")
 
     # ── Step 3: Wait for calendar ─────────────────────────────────────────
     try:
         page.wait_for_selector('bs-daterangepicker-container', state='visible', timeout=8000)
+        _step("Date range calendar confirmed visible")
     except Exception:
-        _step("Calendar container did not appear")
-        return
+        _step("bs-daterangepicker-container not found — proceeding with visible calendar")
+        # Don't return — the calendar might still be usable
     _shot("date_01_calendar_open.png")
 
     # ── Step 4: Navigate left calendar to from_dt month ───────────────────
@@ -879,22 +884,155 @@ def download_bulk_receipts_fully_auto(
             _shot("01_dashboard.png")
 
             # 2. Navigate to Expense Claim Report
+            # Strategy A: Direct URL (confirmed working on May 11, 2026)
+            # Strategy B: Sidebar menu click fallback (robust against URL changes)
             _step("Navigating to Expense Claim Report…")
-            page.evaluate("window.location.hash = '/org/expenses/reports/expenseclaim';")
-            # Wait for the Run button to appear (Angular SPA render), fallback 5s
-            try:
-                page.wait_for_selector('button:has-text("Run"), [class*="run-btn"]', timeout=10000)
-            except Exception:
-                page.wait_for_timeout(5000)
+
+            def _is_on_report_page():
+                """Return True if the Expense Claim Report page is loaded."""
+                try:
+                    page.wait_for_selector('button:has-text("Run")', timeout=3000)
+                    return True
+                except Exception:
+                    pass
+                # Also check page title / heading
+                try:
+                    heading = page.evaluate("""() => {
+                        const h = document.querySelector('h1,h2,h3,[class*="title"],[class*="heading"]');
+                        return h ? (h.innerText||'').trim() : '';
+                    }""")
+                    if "expense claim report" in heading.lower():
+                        return True
+                except Exception:
+                    pass
+                return False
+
+            def _nav_via_url():
+                """Try known direct URLs for the Expense Claim Report page."""
+                _urls = [
+                    f"https://{co}.keka.com/#/org/expenses/reports/expenseclaim",
+                    f"https://{co}.keka.com/#/org/expense/reports/expenseclaim",
+                    f"https://{co}.keka.com/#/org/expenses/reports/expenseclaims",
+                    f"https://{co}.keka.com/#/org/expenses/expenseclaimreport",
+                    f"https://{co}.keka.com/#/org/reports/expenseclaim",
+                ]
+                for _u in _urls:
+                    try:
+                        page.goto(_u, wait_until="domcontentloaded", timeout=15000)
+                        try:
+                            page.wait_for_load_state("networkidle", timeout=6000)
+                        except Exception:
+                            pass
+                        page.wait_for_timeout(2000)
+                        _cur = page.url
+                        # If still on dashboard/home after navigation → this URL redirected
+                        if any(x in _cur for x in ["dashboard", "/home/", "/Account/Login"]):
+                            _step(f"  URL {_u} → redirected to {_cur}")
+                            continue
+                        if _is_on_report_page():
+                            _step(f"✓ Report page via direct URL: {_u}")
+                            return True
+                        _step(f"  URL {_u} → landed at {_cur} (no Run button)")
+                    except Exception as _ex:
+                        _step(f"  URL {_u} failed: {_ex}")
+                return False
+
+            def _nav_via_menu():
+                """Navigate to Expense Claim Report by clicking through Keka's sidebar."""
+                # Go to the confirmed-working expense claims page first
+                _step("  Fallback: navigating via menu from expense claims page…")
+                try:
+                    page.goto(
+                        f"https://{co}.keka.com/#/org/expenses/expenseclaims/pending",
+                        wait_until="domcontentloaded", timeout=15000,
+                    )
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=8000)
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(2000)
+                    _step(f"  On page: {page.url}")
+                except Exception as _ex:
+                    _step(f"  Failed to load pending claims page: {_ex}")
+                    return False
+
+                # Dump all nav links for diagnosis
+                try:
+                    _nav_links = page.evaluate("""() =>
+                        Array.from(document.querySelectorAll('a[href*="report"], a[routerLink*="report"], [href*="report"]'))
+                            .filter(e => e.offsetParent)
+                            .map(e => ({href: e.href||e.getAttribute('routerLink')||'',
+                                        text: (e.innerText||'').trim().substring(0,60)}))
+                    """)
+                    _step(f"  Report links found: {_nav_links}")
+                except Exception:
+                    pass
+
+                # Try clicking any visible "Reports" tab or link on the page
+                for _txt in ["Reports", "Report", "Expense Claim Report"]:
+                    try:
+                        loc = page.locator(
+                            f'a:has-text("{_txt}"), button:has-text("{_txt}"), '
+                            f'span:has-text("{_txt}"), li:has-text("{_txt}")'
+                        ).first
+                        if loc.is_visible(timeout=2000):
+                            loc.click()
+                            page.wait_for_timeout(2000)
+                            if _is_on_report_page():
+                                _step(f"✓ Report page via menu click: '{_txt}'")
+                                return True
+                    except Exception:
+                        pass
+
+                # JS fallback: click any element mentioning 'report'
+                try:
+                    _bbox = page.evaluate("""() => {
+                        const kw = ['expense claim report', 'reports'];
+                        const el = Array.from(document.querySelectorAll('a,button,span,li,div'))
+                            .find(e => {
+                                if (!e.offsetParent) return false;
+                                const t = (e.innerText||e.textContent||'').trim().toLowerCase();
+                                return kw.some(k => t === k || t.startsWith(k));
+                            });
+                        if (!el) return null;
+                        const r = el.getBoundingClientRect();
+                        return {x: r.left+r.width/2, y: r.top+r.height/2};
+                    }""")
+                    if _bbox:
+                        page.mouse.click(_bbox['x'], _bbox['y'])
+                        page.wait_for_timeout(2000)
+                        if _is_on_report_page():
+                            _step("✓ Report page via JS menu click")
+                            return True
+                except Exception:
+                    pass
+
+                return False
+
+            # Run strategies
+            _run_btn_found = _nav_via_url() or _nav_via_menu()
+
+            if not _run_btn_found:
+                _step(f"WARNING: Could not load Expense Claim Report page (url: {page.url})")
+                # Dump nav links for future debugging
+                try:
+                    _all_links = page.evaluate("""() =>
+                        Array.from(document.querySelectorAll('a[href]'))
+                            .filter(e => e.offsetParent)
+                            .map(e => e.href).filter(Boolean)
+                    """)
+                    _step(f"All links on page: {_all_links[:20]}")
+                except Exception:
+                    pass
 
             _shot("02_report_page.png")
 
-            # Save page HTML for debugging
+            # Save page HTML for debugging (full dump to diagnose DOM structure)
             try:
                 html = page.content()
                 with open(os.path.join(out_dir, "page_dump.html"), "w", encoding="utf-8") as f:
-                    f.write(html[:150000])
-                _step("HTML dump saved → page_dump.html")
+                    f.write(html)
+                _step(f"HTML dump saved → page_dump.html ({len(html)} chars)")
             except Exception as ex:
                 _step(f"HTML dump error: {ex}")
 
@@ -1228,15 +1366,34 @@ def download_bulk_receipts_via_ui(
         page.wait_for_timeout(1500)
 
         # 2. Navigate to Expense Claim report
+        # NOTE: window.location.hash via evaluate() does NOT trigger Angular routing.
         _step("Navigating to Expense Claim Report…")
-        page.evaluate("window.location.hash = '/org/expenses/reports/expenseclaim';")
-        try:
-            page.wait_for_selector('button:has-text("Run"), [class*="run-btn"]', timeout=10000)
-        except Exception:
-            page.wait_for_timeout(4000)
+        _REPORT_URLS_UI = [
+            f"https://{co}.keka.com/#/org/expenses/reports/expenseclaim",
+            f"https://{co}.keka.com/#/org/expenses/reports/expenseclaims",
+            f"https://{co}.keka.com/#/org/reports/expenseclaim",
+        ]
+        _run_btn_found_ui = False
+        for _rurl_ui in _REPORT_URLS_UI:
+            try:
+                page.goto(_rurl_ui, wait_until="domcontentloaded", timeout=20000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(2500)
+                try:
+                    page.wait_for_selector('button:has-text("Run"), [class*="run-btn"]', timeout=6000)
+                    _run_btn_found_ui = True
+                    _step(f"✓ Report page loaded: {_rurl_ui} (url: {page.url})")
+                    break
+                except Exception:
+                    _step(f"Run button not found at {_rurl_ui} — url: {page.url}")
+            except Exception as _ex_ui:
+                _step(f"Navigation to {_rurl_ui} failed: {_ex_ui}")
 
-        if "expenseclaim" not in page.url:
-            _step(f"Failed to reach report page (got {page.url})")
+        if not _run_btn_found_ui:
+            _step(f"Failed to reach report page (url: {page.url})")
             browser.close()
             return None
 
