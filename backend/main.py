@@ -280,9 +280,11 @@ async def run_validation(session_id: str, excel_path: str, zip_path: str, skip_r
         unique_paths = list(path_to_keys.keys())
         _step(f"Running OCR on {len(unique_paths)} bills…")
 
-        # Run OCR concurrently — more workers = faster for image-heavy ZIPs
+        # Run OCR concurrently — limit workers to avoid OOM on Railway (512MB RAM)
+        # 2 workers max: each PDF load ~20-50MB, so 2 workers keeps peak usage low
         from concurrent.futures import ThreadPoolExecutor
-        MAX_OCR_WORKERS = min(32, max(8, len(unique_paths)))
+        MAX_OCR_WORKERS = int(os.environ.get("MAX_OCR_WORKERS", "2"))
+        MAX_OCR_WORKERS = min(MAX_OCR_WORKERS, len(unique_paths)) if unique_paths else 1
         with ThreadPoolExecutor(max_workers=MAX_OCR_WORKERS) as pool:
             tasks = {
                 filepath: loop.run_in_executor(pool, process_bill_ocr, filepath, path_hints.get(filepath))
@@ -694,10 +696,20 @@ async def upload_files(
     excel_path = os.path.join(s_dir, "report.xlsx")
     zip_path   = os.path.join(s_dir, "bills.zip")
 
+    # Stream files to disk in chunks — avoids loading entire ZIP into RAM at once
+    _CHUNK = 1024 * 1024  # 1 MB chunks
     with open(excel_path, "wb") as f:
-        f.write(await excel_file.read())
+        while True:
+            chunk = await excel_file.read(_CHUNK)
+            if not chunk:
+                break
+            f.write(chunk)
     with open(zip_path, "wb") as f:
-        f.write(await zip_file.read())
+        while True:
+            chunk = await zip_file.read(_CHUNK)
+            if not chunk:
+                break
+            f.write(chunk)
 
     actor  = _get_actor(authorization)
     client_ip = request.client.host if request.client else ""
