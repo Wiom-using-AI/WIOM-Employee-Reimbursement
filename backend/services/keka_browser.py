@@ -81,10 +81,20 @@ _UA = (
 )
 
 # Browser launch args to bypass bot detection (urlaccessvalidator.js etc.)
+# Memory-saving flags for Railway Trial (512MB RAM) to prevent OOM kills
 _LAUNCH_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--no-sandbox",
     "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--no-zygote",
+    "--disable-setuid-sandbox",
+    "--disable-accelerated-2d-canvas",
+    "--renderer-process-limit=1",
+    "--disable-extensions",
+    "--disable-plugins",
+    "--disable-software-rasterizer",
+    "--single-process",
 ]
 
 # Init script injected into every page to hide Playwright automation signals
