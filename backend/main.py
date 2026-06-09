@@ -283,7 +283,7 @@ async def run_validation(session_id: str, excel_path: str, zip_path: str, skip_r
         # Run OCR concurrently — limit workers to avoid OOM on Railway (512MB RAM)
         # 2 workers max: each PDF load ~20-50MB, so 2 workers keeps peak usage low
         from concurrent.futures import ThreadPoolExecutor
-        MAX_OCR_WORKERS = int(os.environ.get("MAX_OCR_WORKERS", "2"))
+        MAX_OCR_WORKERS = int(os.environ.get("MAX_OCR_WORKERS", "1"))
         MAX_OCR_WORKERS = min(MAX_OCR_WORKERS, len(unique_paths)) if unique_paths else 1
         with ThreadPoolExecutor(max_workers=MAX_OCR_WORKERS) as pool:
             tasks = {

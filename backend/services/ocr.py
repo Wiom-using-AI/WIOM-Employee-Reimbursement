@@ -403,16 +403,20 @@ def extract_text_pdf(pdf_path: str) -> str:
         if PYMUPDF_AVAILABLE and RAPIDOCR_AVAILABLE:
             import tempfile as _tempfile
             import os as _os
+            import gc as _gc
             try:
                 doc = fitz.open(pdf_path)
                 page_texts = []
                 for page in doc:
-                    mat = fitz.Matrix(2, 2)  # 2× zoom for sharper OCR
+                    # Use 1.5× zoom instead of 2× — reduces pixmap RAM by ~44%
+                    mat = fitz.Matrix(1.5, 1.5)
                     pix = page.get_pixmap(matrix=mat)
                     img_bytes = pix.tobytes("png")
+                    del pix  # free pixmap immediately after encoding
                     with _tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
                         tf.write(img_bytes)
                         tmp_path = tf.name
+                    del img_bytes  # free encoded bytes
                     try:
                         page_text = extract_text_image(tmp_path)
                     finally:
@@ -422,6 +426,9 @@ def extract_text_pdf(pdf_path: str) -> str:
                             pass
                     if page_text.strip():
                         page_texts.append(page_text)
+                doc.close()
+                del doc
+                _gc.collect()
                 if page_texts:
                     text = "\n--- PAGE BREAK ---\n".join(page_texts)
             except Exception:
