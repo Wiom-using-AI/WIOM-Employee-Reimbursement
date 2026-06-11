@@ -162,22 +162,22 @@ def _save_session_to_disk():
 # ---------------------------------------------------------------------------
 
 def _solve_captcha(b64: str) -> str:
-    """Use RapidOCR to solve the Keka image captcha from a base64 PNG."""
+    """Solve the Keka image captcha using Tesseract OCR."""
     import base64, io
-    import numpy as np
-    from rapidocr_onnxruntime import RapidOCR
     from PIL import Image
-
-    img_bytes = base64.b64decode(b64)
-    ocr = RapidOCR()
-    pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    arr = np.array(pil)
-    result, _ = ocr(arr)
-    if not result:
+    try:
+        import pytesseract
+        img_bytes = base64.b64decode(b64)
+        pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        # Upscale for better OCR accuracy on small captcha images
+        w, h = pil.size
+        pil = pil.resize((w * 3, h * 3), Image.LANCZOS)
+        text = pytesseract.image_to_string(pil, config="--psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789").strip()
+        log.info("Captcha solved: %s", text)
+        return text
+    except Exception as e:
+        log.warning("Captcha solve failed: %s", e)
         return ""
-    text = "".join(r[1] for r in result).strip()
-    log.info("Captcha solved: %s (conf=%.2f)", text, result[0][2])
-    return text
 
 
 def _do_captcha_login(page, email: str, pwd: str) -> bool:
