@@ -16,6 +16,7 @@ RUN npm run build
 FROM python:3.12-slim
 
 # System dependencies: Tesseract OCR, Poppler (pdf2image), Playwright deps
+# Note: build-essential removed — not needed since rapidocr-onnxruntime is disabled
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \
@@ -26,7 +27,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     libfontconfig1 \
     libglib2.0-0 \
-    build-essential \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

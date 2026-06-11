@@ -13,7 +13,7 @@ Pillow==10.3.0
 pytesseract==0.3.10
 pdf2image==1.17.0
 PyMuPDF==1.24.5
-rapidocr-onnxruntime==1.3.24
+# rapidocr-onnxruntime==1.3.24  # disabled — too heavy for Railway 512MB
 anthropic==0.52.2
 
 # Fuzzy matching

@@ -58,13 +58,8 @@ try:
 except ImportError:
     PILLOW_AVAILABLE = False
 
-# RapidOCR — lightweight image OCR, no binary/cloud needed
-try:
-    from rapidocr_onnxruntime import RapidOCR as _RapidOCR
-    _rapid_ocr = _RapidOCR()
-    RAPIDOCR_AVAILABLE = True
-except Exception:
-    RAPIDOCR_AVAILABLE = False
+# RapidOCR — disabled (ONNX model uses ~150MB RAM, causes OOM on Railway 512MB)
+RAPIDOCR_AVAILABLE = False
 
 # Tesseract — optional fallback
 try:
