@@ -326,14 +326,19 @@ def _do_captcha_login(page, email: str, pwd: str):
 
         if "KekaLogin" in cur_url:
             log.warning("Still on login page after attempt %d — retrying captcha", attempt)
-            # Grab fresh captcha after wrong submit
+            # Click the captcha image to refresh it, then read the NEW captcha
             try:
                 for img in page.query_selector_all("img"):
                     src = img.get_attribute("src") or ""
                     if src.startswith("data:image/png;base64,"):
-                        last_captcha_b64 = src.split(",", 1)[1]
                         img.click()
-                        page.wait_for_timeout(800)
+                        page.wait_for_timeout(1000)
+                        break
+                # Read captcha AFTER refresh so last_captcha_b64 is current
+                for img in page.query_selector_all("img"):
+                    src = img.get_attribute("src") or ""
+                    if src.startswith("data:image/png;base64,"):
+                        last_captcha_b64 = src.split(",", 1)[1]
                         break
             except Exception:
                 pass
@@ -660,12 +665,23 @@ def _captcha_browser_thread(co, email, pwd, ready_event, captcha_holder, input_q
 
         log.info("captcha_thread: on page %s", page.url[:80])
 
-        reached_2fa, captcha_b64 = _do_captcha_login(page, email, pwd)
+        reached_2fa, _ = _do_captcha_login(page, email, pwd)
 
         if reached_2fa:
             # Auto-solve worked — proceed to 2FA
             _handle_2fa_and_signal(page, ctx, browser, co, result_q, ready_event)
             return
+
+        # OCR failed — re-read the CURRENT captcha from the page.
+        # _do_captcha_login may have clicked the image to refresh it, so the
+        # captcha it stored internally is stale. We must read what is on the page NOW.
+        page.wait_for_timeout(600)
+        captcha_b64 = None
+        for _img in page.query_selector_all("img"):
+            _src = _img.get_attribute("src") or ""
+            if _src.startswith("data:image/png;base64,"):
+                captcha_b64 = _src.split(",", 1)[1]
+                break
 
         if not captcha_b64:
             result_q.put({"status": "error",
@@ -674,8 +690,9 @@ def _captcha_browser_thread(co, email, pwd, ready_event, captcha_holder, input_q
             browser.close()
             return
 
-        # OCR failed — share captcha image with caller, keep browser alive
+        # Share the current captcha with caller, keep browser alive
         captcha_holder["captcha_b64"] = captcha_b64
+        log.info("captcha_thread: sharing current captcha with user (%d bytes)", len(captcha_b64))
         ready_event.set()  # unblock initiate_login
 
         # Wait for user captcha submissions (browser stays open!)
