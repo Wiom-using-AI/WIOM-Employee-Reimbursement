@@ -11,7 +11,8 @@ import time
 import json
 from typing import Optional, List
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "app.db")
+_default_db = os.path.join(os.path.dirname(__file__), "..", "app.db")
+DB_PATH = os.environ.get("DB_PATH", _default_db)
 
 # Thread-safe connections: each call gets its own connection
 def _conn():
