@@ -591,22 +591,50 @@ def _login_and_get_session_internal(
             browser.close()
             return {"status": "error", "message": "2FA page reached but no TwoFactorUserId cookie found"}
 
-        log.info("2FA page reached — sending OTP to email")
-        otp_verify_url = None
-        try:
-            page.click('button:has-text("Send code to email")', timeout=8000)
-            page.wait_for_timeout(3000)
-            otp_verify_url = page.url
-            log.info("OTP sent to email. VerifyCode URL: %s", otp_verify_url[:100])
-        except Exception as e:
-            log.warning("Could not click 'Send code to email': %s — trying mobile", e)
+        log.info("2FA page reached — sending OTP")
+        otp_verify_url = page.url
+        page.wait_for_timeout(2000)
+        log.info("2FA page body: %s", page.inner_text("body")[:300].replace("\n", " "))
+
+        _OTP_SELECTORS = [
+            'button:has-text("Send code to email")',
+            'button:has-text("Send Code to Email")',
+            'button:has-text("Send code to Email")',
+            'button:has-text("Send OTP to email")',
+            'button:has-text("Send code")',
+            'button:has-text("Email")',
+            'button:has-text("Send code to mobile")',
+            'button:has-text("Mobile")',
+            'a:has-text("Send code to email")',
+            'a:has-text("Email")',
+        ]
+        otp_sent = False
+        for sel in _OTP_SELECTORS:
             try:
-                page.click('button:has-text("Send code to mobile")', timeout=5000)
-                page.wait_for_timeout(3000)
-                otp_verify_url = page.url
-                log.info("OTP sent to mobile. VerifyCode URL: %s", otp_verify_url[:100])
-            except Exception:
-                pass
+                btn = page.query_selector(sel)
+                if btn and btn.is_visible():
+                    btn.click()
+                    page.wait_for_timeout(3000)
+                    otp_verify_url = page.url
+                    log.info("OTP sent via '%s'. URL: %s", sel, otp_verify_url[:100])
+                    otp_sent = True
+                    break
+            except Exception as e:
+                log.debug("OTP selector '%s' failed: %s", sel, e)
+
+        if not otp_sent:
+            log.warning("No OTP button found — clicking first visible button on 2FA page")
+            try:
+                for btn in page.query_selector_all("button"):
+                    if btn.is_visible():
+                        log.info("Fallback: clicking button '%s'", btn.inner_text().strip())
+                        btn.click()
+                        page.wait_for_timeout(3000)
+                        otp_verify_url = page.url
+                        otp_sent = True
+                        break
+            except Exception as fe:
+                log.warning("Fallback button click failed: %s", fe)
 
         pending = ctx.cookies()
         browser.close()
@@ -615,7 +643,7 @@ def _login_and_get_session_internal(
             "status": "2fa_required",
             "pending_cookies": pending,
             "verify_url": otp_verify_url,
-            "message": "OTP sent to email. Enter the code to complete login.",
+            "message": "OTP sent to your registered email. Enter the code to complete login.",
         }
 
 
@@ -764,23 +792,63 @@ def _captcha_browser_thread(co, email, pwd, ready_event, captcha_holder, input_q
 
 
 def _handle_2fa_and_signal(page, ctx, browser, co, result_q, ready_event):
-    """Helper: click 'Send code to email', collect cookies, put result into result_q."""
+    """Helper: click OTP send button (tries multiple selectors), collect cookies, put result."""
     otp_verify_url = page.url
-    try:
-        page.click('button:has-text("Send code to email")', timeout=8000)
-        page.wait_for_timeout(3000)
-        otp_verify_url = page.url
-        log.info("OTP email sent. VerifyCode URL: %s", otp_verify_url[:100])
-    except Exception as e:
-        log.warning("Could not click 'Send code to email': %s", e)
+    otp_sent = False
+
+    # Keka uses different button text depending on version/locale — try all known variants
+    _OTP_BUTTON_SELECTORS = [
+        'button:has-text("Send code to email")',
+        'button:has-text("Send Code to Email")',
+        'button:has-text("Send code to Email")',
+        'button:has-text("Send OTP to email")',
+        'button:has-text("Send code")',
+        'button:has-text("Email")',
+        'a:has-text("Send code to email")',
+        'a:has-text("Email")',
+    ]
+
+    page.wait_for_timeout(2000)  # let 2FA page fully load
+    log.info("2FA page body snippet: %s", page.inner_text("body")[:300].replace("\n", " "))
+
+    for sel in _OTP_BUTTON_SELECTORS:
+        try:
+            btn = page.query_selector(sel)
+            if btn and btn.is_visible():
+                btn.click()
+                page.wait_for_timeout(3000)
+                otp_verify_url = page.url
+                log.info("OTP sent via selector '%s'. URL: %s", sel, otp_verify_url[:100])
+                otp_sent = True
+                break
+        except Exception as e:
+            log.debug("Selector '%s' failed: %s", sel, e)
+
+    if not otp_sent:
+        # Last resort: click first visible button on 2FA page
+        log.warning("No OTP button found with known selectors — trying first visible button")
+        try:
+            for btn in page.query_selector_all("button"):
+                if btn.is_visible():
+                    txt = btn.inner_text().strip()
+                    log.info("Clicking fallback button: '%s'", txt)
+                    btn.click()
+                    page.wait_for_timeout(3000)
+                    otp_verify_url = page.url
+                    otp_sent = True
+                    break
+        except Exception as e:
+            log.warning("Fallback button click failed: %s", e)
 
     pending_cookies = ctx.cookies()
     browser.close()
+    msg = "OTP sent to your registered email. Enter the code to complete login." if otp_sent \
+          else "Reached 2FA page but could not click send button. Check if OTP arrived anyway."
     result_q.put({
         "status":          "2fa_required",
         "pending_cookies": pending_cookies,
         "verify_url":      otp_verify_url,
-        "message":         "OTP sent to email. Enter the code to complete login.",
+        "message":         msg,
     })
     if ready_event is not None:
         ready_event.set()
