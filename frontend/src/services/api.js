@@ -254,6 +254,11 @@ export async function kekaLoginVerify(token, otp) {
   return data; // { status: "ok" | "error", message? }
 }
 
+export async function kekaLoginCaptcha(token, captchaText) {
+  const { data } = await client.post("/keka/login/captcha", { token, captcha_text: captchaText });
+  return data; // { status: "2fa_required" | "captcha_required" | "ok" | "error", token?, captcha_b64?, message? }
+}
+
 export async function kekaLoginLogout() {
   const { data } = await client.post("/keka/login/logout");
   return data;

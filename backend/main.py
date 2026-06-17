@@ -3887,6 +3887,32 @@ async def keka_login_verify(body: KekaLoginVerifyRequest):
         raise HTTPException(500, f"OTP verification failed: {exc}")
 
 
+class KekaLoginCaptchaRequest(BaseModel):
+    token: str
+    captcha_text: str
+
+
+@app.post("/keka/login/captcha")
+async def keka_login_captcha(body: KekaLoginCaptchaRequest):
+    """User has solved the captcha manually — complete the login."""
+    import asyncio
+    import traceback
+    import logging as _log
+    from services.keka_browser import submit_captcha_and_login
+
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: _run_in_proactor_thread(
+                submit_captcha_and_login, body.token, body.captcha_text.strip()
+            ),
+        )
+        return result
+    except Exception as exc:
+        _log.getLogger(__name__).error("keka_login_captcha error: %s\n%s", exc, traceback.format_exc())
+        raise HTTPException(500, f"Captcha login failed: {exc}")
+
+
 @app.post("/keka/login/logout")
 def keka_login_logout():
     """Clear the cached session (forces re-login on next sync)."""

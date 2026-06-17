@@ -121,6 +121,9 @@ _session_loaded = False
 # Holds pending 2FA state waiting for OTP { token → {"cookies": [...], "expires_at": float, "company": str} }
 _pending_2fa: dict = {}
 
+# Holds pending captcha state: auto-OCR failed, waiting for user to solve manually
+_pending_captcha: dict = {}  # token → {email, pwd, company, captcha_b64, expires_at}
+
 
 def _load_session_from_disk():
     """Load persisted session from disk into memory (called once at startup)."""
@@ -162,30 +165,90 @@ def _save_session_to_disk():
 # ---------------------------------------------------------------------------
 
 def _solve_captcha(b64: str) -> str:
-    """Solve the Keka image captcha using Tesseract OCR."""
+    """
+    Try multiple preprocessing + Tesseract strategies.
+    Returns best candidate (5-8 alphanumeric chars) or "" if all fail.
+    """
     import base64, io
-    from PIL import Image
+    from PIL import Image, ImageFilter, ImageOps, ImageEnhance
     try:
         import pytesseract
-        img_bytes = base64.b64decode(b64)
-        pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        # Upscale for better OCR accuracy on small captcha images
-        w, h = pil.size
-        pil = pil.resize((w * 3, h * 3), Image.LANCZOS)
-        text = pytesseract.image_to_string(pil, config="--psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789").strip()
-        log.info("Captcha solved: %s", text)
-        return text
-    except Exception as e:
-        log.warning("Captcha solve failed: %s", e)
+    except ImportError:
+        log.warning("pytesseract not available")
         return ""
 
+    WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
-def _do_captcha_login(page, email: str, pwd: str) -> bool:
+    try:
+        img_bytes = base64.b64decode(b64)
+        original = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    except Exception as e:
+        log.warning("Captcha decode failed: %s", e)
+        return ""
+
+    def _ocr(img, psm):
+        try:
+            text = pytesseract.image_to_string(
+                img,
+                config=f"--psm {psm} -c tessedit_char_whitelist={WHITELIST}",
+            ).strip().replace(" ", "").replace("\n", "")
+            return "".join(c for c in text if c.isalnum())
+        except Exception:
+            return ""
+
+    candidates = []
+    for scale in (3, 4, 2):
+        w, h = original.size
+        big  = original.resize((w * scale, h * scale), Image.LANCZOS)
+        gray = big.convert("L")
+
+        for psm in (8, 6, 7, 13):
+            for img in (big, gray):
+                t = _ocr(img, psm)
+                if 4 <= len(t) <= 8:
+                    candidates.append(t)
+
+            # Binarize with mean threshold
+            try:
+                threshold = sum(gray.getdata()) // len(gray.getdata())
+                binary = gray.point(lambda x: 255 if x > threshold else 0, "1")
+                t = _ocr(binary, psm)
+                if 4 <= len(t) <= 8:
+                    candidates.append(t)
+            except Exception:
+                pass
+
+            # Sharpen + OCR
+            sharp = big.filter(ImageFilter.SHARPEN).filter(ImageFilter.SHARPEN)
+            t = _ocr(sharp, psm)
+            if 4 <= len(t) <= 8:
+                candidates.append(t)
+
+            # Boost contrast + OCR
+            enhanced = ImageEnhance.Contrast(big).enhance(2.5)
+            t = _ocr(enhanced, psm)
+            if 4 <= len(t) <= 8:
+                candidates.append(t)
+
+    if candidates:
+        from collections import Counter
+        best, votes = Counter(candidates).most_common(1)[0]
+        log.info("Captcha solved (%d candidates, top=%d votes): %s", len(candidates), votes, best)
+        return best
+
+    log.warning("All OCR strategies failed for captcha")
+    return ""
+
+
+def _do_captcha_login(page, email: str, pwd: str):
     """
     Fill and submit the KekaLogin form (email + password + captcha).
-    Returns True if 2FA page was reached.
-    Retries captcha up to 3 times.
+    Returns (True, None) if 2FA page was reached.
+    Returns (False, last_captcha_b64) if all 3 OCR attempts failed — caller
+    can return this captcha image to the user for manual solving.
     """
+    last_captcha_b64 = None
+
     for attempt in range(1, 4):
         # Grab captcha image base64
         captcha_b64 = None
@@ -199,6 +262,8 @@ def _do_captcha_login(page, email: str, pwd: str) -> bool:
             log.warning("Captcha image not found on attempt %d", attempt)
             page.wait_for_timeout(1000)
             continue
+
+        last_captcha_b64 = captcha_b64  # keep last seen captcha for fallback
 
         captcha_text = _solve_captcha(captcha_b64)
         if not captcha_text:
@@ -221,7 +286,6 @@ def _do_captcha_login(page, email: str, pwd: str) -> bool:
                 if email_el.is_visible():
                     email_el.fill(email)
                 else:
-                    # page.evaluate arrow-function form avoids `arguments` scoping issues
                     page.evaluate(
                         "(v) => { const el = document.querySelector('input[name=\"Email\"]'); if(el) el.value = v; }",
                         email,
@@ -255,14 +319,16 @@ def _do_captcha_login(page, email: str, pwd: str) -> bool:
 
         if "SendCode" in cur_url or "VerifyCode" in cur_url:
             log.info("Reached 2FA page on attempt %d", attempt)
-            return True
+            return True, None
 
         if "KekaLogin" in cur_url:
             log.warning("Still on login page after attempt %d — retrying captcha", attempt)
+            # Grab fresh captcha after wrong submit
             try:
                 for img in page.query_selector_all("img"):
                     src = img.get_attribute("src") or ""
                     if src.startswith("data:image/png;base64,"):
+                        last_captcha_b64 = src.split(",", 1)[1]
                         img.click()
                         page.wait_for_timeout(800)
                         break
@@ -271,10 +337,10 @@ def _do_captcha_login(page, email: str, pwd: str) -> bool:
             continue
 
         log.info("Unexpected redirect to %s — treating as success", cur_url[:80])
-        return True
+        return True, None
 
-    log.error("Login failed after 3 captcha attempts")
-    return False
+    log.error("Login failed after 3 captcha attempts — returning captcha for manual solve")
+    return False, last_captcha_b64
 
 
 def _login_and_get_session_internal(
@@ -497,9 +563,11 @@ def _login_and_get_session_internal(
 
         log.info("On KekaLogin page: %s", page.url[:80])
 
-        reached_2fa = _do_captcha_login(page, email, pwd)
+        reached_2fa, captcha_b64 = _do_captcha_login(page, email, pwd)
         if not reached_2fa:
             browser.close()
+            if captcha_b64:
+                return {"status": "captcha_required", "captcha_b64": captcha_b64}
             return {
                 "status": "error",
                 "message": "Login failed after 3 captcha attempts. Check KEKA_EMAIL and KEKA_PASSWORD in .env.",
@@ -549,6 +617,155 @@ def _login_and_get_session_internal(
 # Public session management  (all sync — safe to call from ThreadPoolExecutor)
 # ---------------------------------------------------------------------------
 
+def _make_captcha_token(company: str, captcha_b64: str) -> dict:
+    token = secrets.token_urlsafe(16)
+    _pending_captcha[token] = {
+        "email":       KEKA_EMAIL,
+        "pwd":         KEKA_PASSWORD,
+        "company":     company,
+        "captcha_b64": captcha_b64,
+        "expires_at":  time.time() + 300,  # 5-minute window
+    }
+    return {
+        "status":      "captcha_required",
+        "captcha_b64": captcha_b64,
+        "token":       token,
+        "message":     "Auto-solve failed. Please type the captcha text shown in the image.",
+    }
+
+
+def _submit_manual_captcha_internal(token: str, captcha_text: str) -> dict:
+    """
+    User has read the captcha image and provided the text.
+    Opens a fresh browser, navigates to KekaLogin, and submits with the user-provided text.
+    Returns 2fa_required on correct captcha, captcha_required (with new image) on wrong captcha.
+    """
+    pending = _pending_captcha.get(token)
+    if not pending:
+        return {"status": "error", "message": "Captcha session expired. Please start login again."}
+    if pending["expires_at"] < time.time():
+        _pending_captcha.pop(token, None)
+        return {"status": "error", "message": "Captcha session expired (5-min window). Please start login again."}
+
+    co    = pending["company"]
+    email = pending["email"]
+    pwd   = pending["pwd"]
+
+    _ensure_proactor_loop()
+    from playwright.sync_api import sync_playwright
+
+    base_url = f"https://{co}.keka.com"
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=_LAUNCH_ARGS)
+        ctx     = browser.new_context(user_agent=_UA)
+        ctx.add_init_script(_STEALTH_SCRIPT)
+        page    = ctx.new_page()
+
+        try:
+            page.goto(base_url + "/", wait_until="networkidle", timeout=30000)
+        except Exception as e:
+            log.warning("Navigation error (manual captcha): %s", e)
+        page.wait_for_timeout(1000)
+
+        if "KekaLogin" not in page.url:
+            try:
+                btn = page.wait_for_selector(
+                    'button:has-text("Continue with Password"), a:has-text("Continue with Password")',
+                    timeout=8000,
+                )
+                btn.click()
+                page.wait_for_timeout(2000)
+            except Exception:
+                try:
+                    page.goto(
+                        "https://app.keka.com/Account/KekaLogin?returnUrl=%2F",
+                        wait_until="networkidle", timeout=15000,
+                    )
+                except Exception:
+                    pass
+                page.wait_for_timeout(1000)
+
+        log.info("Manual captcha: on page %s", page.url[:80])
+
+        # Fill the form with user-provided captcha text
+        try:
+            email_el = page.query_selector('input[name="Email"]')
+            if email_el:
+                if email_el.is_visible():
+                    email_el.fill(email)
+                else:
+                    page.evaluate(
+                        "(v) => { const el = document.querySelector('input[name=\"Email\"]'); if(el) el.value = v; }",
+                        email,
+                    )
+            pwd_el = page.query_selector('input[name="Password"]')
+            if pwd_el:
+                if pwd_el.is_visible():
+                    pwd_el.fill(pwd)
+                else:
+                    page.evaluate(
+                        "(v) => { const el = document.querySelector('input[name=\"Password\"]'); if(el) el.value = v; }",
+                        pwd,
+                    )
+            log.info("Manual captcha submit: '%s'", captcha_text)
+            page.fill('input[name="captcha"]', captcha_text, timeout=5000)
+        except Exception as e:
+            browser.close()
+            return {"status": "error", "message": f"Form fill failed: {e}"}
+
+        try:
+            page.click('button:has-text("Login"), input[type="submit"][value="Login"]')
+        except Exception as e:
+            browser.close()
+            return {"status": "error", "message": f"Submit failed: {e}"}
+
+        page.wait_for_timeout(3000)
+        cur_url = page.url
+        log.info("After manual captcha submit: %s", cur_url[:80])
+
+        # Still on login page → wrong captcha → grab fresh captcha image and ask again
+        if "KekaLogin" in cur_url:
+            new_b64 = None
+            for img in page.query_selector_all("img"):
+                src = img.get_attribute("src") or ""
+                if src.startswith("data:image/png;base64,"):
+                    new_b64 = src.split(",", 1)[1]
+                    break
+            browser.close()
+            _pending_captcha.pop(token, None)
+            if new_b64:
+                return {"status": "captcha_required", "captcha_b64": new_b64}
+            return {"status": "error", "message": "Wrong captcha. Could not reload captcha image."}
+
+        # Reached 2FA
+        if "SendCode" in cur_url or "VerifyCode" in cur_url:
+            log.info("Manual captcha success — 2FA page reached")
+            _pending_captcha.pop(token, None)
+            otp_verify_url = cur_url
+            try:
+                page.click('button:has-text("Send code to email")', timeout=8000)
+                page.wait_for_timeout(3000)
+                otp_verify_url = page.url
+            except Exception as e:
+                log.warning("Could not click 'Send code to email': %s", e)
+            pending_cookies = ctx.cookies()
+            browser.close()
+            return {
+                "status":          "2fa_required",
+                "pending_cookies": pending_cookies,
+                "verify_url":      otp_verify_url,
+                "message":         "OTP sent to email. Enter the code to complete login.",
+            }
+
+        # Unexpected redirect — treat as logged in without 2FA
+        log.info("Manual captcha: unexpected redirect %s — treating as ok", cur_url[:80])
+        _pending_captcha.pop(token, None)
+        keka_cookies = [c for c in ctx.cookies() if "keka.com" in c.get("domain", "")]
+        browser.close()
+        return {"status": "ok", "cookies": keka_cookies}
+
+
 def _make_pending_token(result: dict, co: str) -> dict:
     token = secrets.token_urlsafe(16)
     _pending_2fa[token] = {
@@ -595,6 +812,8 @@ def initiate_login(company: str = None) -> dict:
         return {"status": "ok"}
     if result["status"] == "2fa_required":
         return _make_pending_token(result, co)
+    if result["status"] == "captcha_required":
+        return _make_captcha_token(co, result["captcha_b64"])
     return result
 
 
@@ -626,6 +845,29 @@ def verify_otp(otp: str, token: str, company: str = None) -> dict:
         _save_session_to_disk()
         log.info("Keka OTP verification success for %s — session saved for 24h", co)
         return {"status": "ok"}
+    return result
+
+
+def submit_captcha_and_login(token: str, captcha_text: str, company: str = None) -> dict:
+    """
+    Public API: user manually read the captcha image and provided the text.
+    Completes the login flow and returns 2fa_required, captcha_required, or ok.
+    """
+    co     = company or KEKA_COMPANY_NAME
+    result = _submit_manual_captcha_internal(token, captcha_text)
+
+    if result["status"] == "2fa_required":
+        return _make_pending_token(result, co)
+    if result["status"] == "ok":
+        _session_cache[co] = {
+            "cookies":    result.get("cookies", []),
+            "expires_at": time.time() + _SESSION_TTL,
+        }
+        _save_session_to_disk()
+        return {"status": "ok"}
+    if result["status"] == "captcha_required":
+        # Wrong captcha → make a new token for the fresh captcha image
+        return _make_captcha_token(co, result["captcha_b64"])
     return result
 
 

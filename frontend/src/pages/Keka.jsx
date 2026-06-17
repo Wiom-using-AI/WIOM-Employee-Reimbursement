@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   kekaConfig,
-  kekaLoginStart, kekaLoginVerify,
+  kekaLoginStart, kekaLoginVerify, kekaLoginCaptcha,
   kekaPostmanInteractive, kekaPostmanStatus, kekaPostmanProcess, kekaPostmanDownloadUrl,
   pollStatus,
 } from "../services/api";
@@ -93,15 +93,19 @@ export default function KekaPage() {
   const [loginToken,     setLoginToken]     = useState("");
   const [loginOtp,       setLoginOtp]       = useState("");
   const [loginLoading,   setLoginLoading]   = useState(false);
-  const [loginStep,      setLoginStep]      = useState("idle"); // "idle" | "otp_sent" | "verifying"
+  const [loginStep,      setLoginStep]      = useState("idle"); // "idle" | "captcha" | "otp_sent" | "verifying"
   const [loginMessage,   setLoginMessage]   = useState("");
   const [loginError,     setLoginError]     = useState("");
+  const [captchaB64,     setCaptchaB64]     = useState("");
+  const [captchaInput,   setCaptchaInput]   = useState("");
 
   async function handleLoginStart() {
     setLoginLoading(true);
     setLoginError("");
     setLoginStep("idle");
     setLoginMessage("");
+    setCaptchaB64("");
+    setCaptchaInput("");
     try {
       const res = await kekaLoginStart();
       if (res.status === "ok") {
@@ -113,11 +117,47 @@ export default function KekaPage() {
         setLoginToken(res.token);
         setLoginStep("otp_sent");
         setLoginMessage(res.message || "OTP sent to your email. Enter it below.");
+      } else if (res.status === "captcha_required") {
+        setLoginToken(res.token);
+        setCaptchaB64(res.captcha_b64);
+        setCaptchaInput("");
+        setLoginStep("captcha");
+        setLoginMessage(res.message || "Auto-solve failed. Type the captcha text below.");
       } else {
         setLoginError(res.message || "Login failed");
       }
     } catch (err) {
       setLoginError(err.response?.data?.detail || err.message || "Login failed");
+    }
+    setLoginLoading(false);
+  }
+
+  async function handleSubmitCaptcha() {
+    if (!captchaInput.trim() || !loginToken) return;
+    setLoginLoading(true);
+    setLoginError("");
+    try {
+      const res = await kekaLoginCaptcha(loginToken, captchaInput.trim());
+      if (res.status === "2fa_required") {
+        setLoginToken(res.token);
+        setLoginStep("otp_sent");
+        setLoginMessage(res.message || "OTP sent to your email. Enter it below.");
+        setCaptchaB64("");
+      } else if (res.status === "captcha_required") {
+        // Wrong captcha — show the new captcha image
+        setLoginToken(res.token);
+        setCaptchaB64(res.captcha_b64);
+        setCaptchaInput("");
+        setLoginError("Wrong captcha. Please try again with the new image.");
+      } else if (res.status === "ok") {
+        setShowLoginModal(false);
+        setLoginStep("idle");
+        kekaConfig().then(setKekaConfigData).catch(() => {});
+      } else {
+        setLoginError(res.message || "Captcha submission failed");
+      }
+    } catch (err) {
+      setLoginError(err.response?.data?.detail || err.message || "Captcha submission failed");
     }
     setLoginLoading(false);
   }
@@ -154,6 +194,8 @@ export default function KekaPage() {
     setLoginToken("");
     setLoginError("");
     setLoginMessage("");
+    setCaptchaB64("");
+    setCaptchaInput("");
   }
 
   // ── Postman-style interactive flow ────────────────────────────────────────
@@ -568,6 +610,71 @@ export default function KekaPage() {
                       </>
                     ) : "Send OTP to Email"}
                   </button>
+                </div>
+              </>
+            )}
+
+            {loginStep === "captcha" && (
+              <>
+                <div className="mb-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg text-sm text-amber-700 dark:text-amber-300">
+                  Auto-solve failed. Type the characters from the image below.
+                </div>
+                {captchaB64 && (
+                  <div className="mb-4 flex flex-col items-center gap-2">
+                    <div className="border-2 border-slate-200 dark:border-gray-600 rounded-lg p-3 bg-white dark:bg-gray-800">
+                      <img
+                        src={`data:image/png;base64,${captchaB64}`}
+                        alt="Captcha"
+                        className="max-w-full"
+                        style={{ imageRendering: "pixelated", minHeight: "40px" }}
+                      />
+                    </div>
+                    <p className="text-xs text-slate-400 dark:text-slate-500">
+                      Blurry? The app already tried to enlarge it — just type what you see.
+                    </p>
+                  </div>
+                )}
+                <div className="mb-5">
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-gray-400 mb-1.5 uppercase tracking-wide">
+                    Captcha Text
+                  </label>
+                  <input
+                    type="text"
+                    value={captchaInput}
+                    onChange={e => setCaptchaInput(e.target.value)}
+                    onKeyDown={e => e.key === "Enter" && handleSubmitCaptcha()}
+                    placeholder="Type the characters shown above"
+                    maxLength={10}
+                    autoFocus
+                    className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-amber-400 focus:border-transparent outline-none text-center tracking-widest text-lg font-mono"
+                  />
+                </div>
+                <div className="flex gap-3 justify-between">
+                  <button
+                    onClick={() => { setLoginStep("idle"); setCaptchaB64(""); setCaptchaInput(""); }}
+                    disabled={loginLoading}
+                    className="text-xs text-slate-400 hover:text-slate-600 dark:hover:text-gray-300 transition-colors"
+                  >
+                    Try auto-solve again
+                  </button>
+                  <div className="flex gap-3">
+                    <button onClick={() => setShowLoginModal(false)} className="btn-secondary text-sm">Cancel</button>
+                    <button
+                      onClick={handleSubmitCaptcha}
+                      disabled={loginLoading || !captchaInput.trim()}
+                      className="flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {loginLoading ? (
+                        <>
+                          <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                          </svg>
+                          Submitting…
+                        </>
+                      ) : "Submit Captcha"}
+                    </button>
+                  </div>
                 </div>
               </>
             )}
